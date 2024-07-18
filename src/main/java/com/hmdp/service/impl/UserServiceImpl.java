@@ -13,6 +13,7 @@ import com.hmdp.mapper.UserMapper;
 import com.hmdp.service.IUserService;
 import com.hmdp.utils.RegexUtils;
 import com.hmdp.utils.UserHolder;
+import org.springframework.data.redis.connection.BitFieldSubCommands;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
@@ -20,7 +21,10 @@ import javax.annotation.Resource;
 import javax.servlet.http.HttpSession;
 
 import java.nio.file.CopyOption;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
@@ -63,44 +67,40 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
 
     @Override
     public Result login(LoginFormDTO loginForm, HttpSession session) {
-        // 1.校验手机号
+        // 校验手机号
         String phone = loginForm.getPhone();
         if (RegexUtils.isPhoneInvalid(phone)) {
-            // 2.如果不符合，返回错误信息
             return Result.fail("手机号格式不正确");
         }
-        // 2.校验验证码
+        // 校验验证码
         Object cacheCode = stringRedisTemplate.opsForValue().get(LOGIN_CODE_KEY + phone);
         String code = loginForm.getCode();
         if (cacheCode == null || !cacheCode.equals(code)) {
-            // 3.不一致，返回错误信息
             return Result.fail("验证码错误");
         }
 
-        // 4.一致，根据手机号查询用户信息
         User user = query().eq("phone", phone).one();
 
-        // 5.判断用户是否存在
         if (user == null) {
-            // 6.不存在，创建用户
             user = createUserWithPhone(phone);
         }
+        query().eq("phone", phone).one();
 
-        // 7.保存用户信息到redis中
-        // 7.1.随机生成token作为登录令牌
+        // 保存用户信息到redis
+        // 随机生成token作为登录令牌
         String token = UUID.randomUUID().toString(true);
-        // 7.2.将User对象转为Hash存储
+        // 将User对象转为Hash存储
         UserDTO userDTO = BeanUtil.copyProperties(user, UserDTO.class);
         Map<String,Object> userMap = BeanUtil.beanToMap(userDTO,new HashMap<>(),
                 CopyOptions.create()
                         .setIgnoreNullValue(true)
                         .setFieldValueEditor((fieldName,fieldValue)->fieldValue.toString()));
-        // 7.3.存储
+        // 存储
         stringRedisTemplate.opsForHash().putAll(LOGIN_USER_KEY+token, userMap);
-        // 7.4.设置过期时间
+        // 设置过期时间
         stringRedisTemplate.expire(LOGIN_USER_KEY+token, LOGIN_USER_TTL, TimeUnit.SECONDS);
 
-        // 8.返回token
+        // 8.返回token (User对象转为UserDTO，再存入session中)
         session.setAttribute("user", BeanUtil.copyProperties(user, UserDTO.class));
         return Result.ok(token);
     }
@@ -109,6 +109,62 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
     public Result logout() {
         UserHolder.removeUser();
         return Result.ok();
+    }
+
+    @Override
+    public Result sign() {
+        // 获取当前用户
+        Long userId = UserHolder.getUser().getId();
+        // 获取当前时间
+        LocalDateTime now = LocalDateTime.now();
+        String keySuffix = now.format(DateTimeFormatter.ofPattern(":yyyyMM"));
+        // 拼接key
+        String key = USER_SIGN_KEY + userId + keySuffix;
+        // 获取今天是本月第几天
+        int dayOdMonth = now.getDayOfMonth();
+        // 写入redis SETBIT key offset 1
+        stringRedisTemplate.opsForValue().setBit(key,dayOdMonth-1,true);
+        return Result.ok();
+    }
+
+    @Override
+    public Result signCount() {
+        // 获取当前用户
+        Long userId = UserHolder.getUser().getId();
+        // 获取当前时间
+        LocalDateTime now = LocalDateTime.now();
+        String keySuffix = now.format(DateTimeFormatter.ofPattern(":yyyyMM"));
+        // 拼接key
+        String key = USER_SIGN_KEY + userId + keySuffix;
+        // 获取今天是本月第几天
+        int dayOdMonth = now.getDayOfMonth();
+        // 获取本月截止今天的所有签到记录，返回的是十进制数字
+        List<Long> result = stringRedisTemplate.opsForValue().bitField(
+                key,
+                BitFieldSubCommands.create()
+                        .get(BitFieldSubCommands.BitFieldType.unsigned(dayOdMonth)).valueAt(0));
+        if (result == null || result.isEmpty()){
+            return Result.ok(0);
+        }
+        Long num = result.get(0);
+        if (num == null || num ==0){
+            return Result.ok(0);
+        }
+
+        // 循环遍历
+        int count = 0;
+        while (true){
+            // 和1做与运算，得到数字的最后一个bit位
+            if ((num & 1) == 0){
+                break;
+            }else {
+                count++;
+            }
+            // 右移一位，抛弃最后一位
+            num >>>= 1;
+        }
+
+        return Result.ok(count);
     }
 
     private User createUserWithPhone(String phone) {

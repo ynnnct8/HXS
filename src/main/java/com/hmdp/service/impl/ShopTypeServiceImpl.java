@@ -39,23 +39,25 @@ public class ShopTypeServiceImpl extends ServiceImpl<ShopTypeMapper, ShopType> i
     @Override
     public Result queryTypeList() {
         String key = CACHE_SHOP_TYPE_KEY + UUID.randomUUID(true);
-        // 先从redis中查询商铺缓存
+
+        // 查询缓存
         String shopTypeJson = stringRedisTemplate.opsForValue().get(key);
-        // 判断是否有缓存
-        if (StrUtil.isNotBlank(shopTypeJson)) {
-            // 有缓存则直接返回
+
+        if (StrUtil.isNotBlank(shopTypeJson)){
             List<ShopType> typeList = JSONUtil.toList(shopTypeJson, ShopType.class);
             return Result.ok(typeList);
         }
-        // 没有缓存则查询数据库
+
+        // 缓存中没有，查询数据库
         List<ShopType> typeList = this.list(new LambdaQueryWrapper<ShopType>().orderByAsc(ShopType::getSort));
-        // 不存在则返回失败
-        if (typeList == null) {
-            return Result.fail("商铺类型不存在");
+        if (typeList == null){
+            return Result.fail("店铺类型不存在");
         }
-        // 存在则将商铺数据写入缓存
+
+        // 写入缓存
         stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(typeList),
                 CACHE_SHOP_TYPE_TTL, TimeUnit.MINUTES);
-        return Result.ok(typeList);
+
+        return  Result.ok(typeList);
     }
 }
